@@ -159,71 +159,87 @@ getServices();
 ```bash
 const axios = require("axios");
 
-const ENV_URL = "<Environment-URL>";
-const API_TOKEN = "<YOUR_TOKEN>";
+const ENV_URL = "<ENV_URL>";
+const API_TOKEN = "<Token-id>";
 
 const services = [
-  {
-    serviceId: "<SERVICE-ID-1>",
-    endpoints: ["/api/auth/login", "/api/auth/signup"]
-  },
-  {
-    serviceId: "<SERVICE-ID-2>",
-    endpoints: ["/api/groups", "/api/expense"]
-  },
-  {
-    serviceId: "<SERVICE-ID-3>",
-    endpoints: ["/api/payment", "/api/orders"]
-  }
+    {
+        serviceName: "frontend",
+        endpoints: ["/api/auth/login", "/api/auth/signup"]
+    },
+    {
+        serviceName: "ExpenseController",
+        endpoints: ["/api/expense", "/api/expense/1"]
+    },
+    {
+        serviceName: "GroupController",
+        endpoints: ["/api/group", "/api/group/1"]
+    }
 ];
 
-async function createKeyRequests() {
-  try {
-    const payload = services.flatMap((service) =>
-      service.endpoints.map((ep) => ({
-        schemaId: "builtin:settings.subscriptions.service",
-        scope: service.serviceId,
-        value: {
-          enabled: true,
-          requestName: ep,
-          conditions: [
-            {
-              attribute: "REQUEST_NAME",
-              comparisonInfo: {
-                type: "STRING",
-                operator: "EQUALS",
-                value: ep
-              }
+async function getServiceIdByName(serviceName) {
+    try {
+        const response = await axios.get(`${ENV_URL}/api/v2/entities`, {
+            params: {
+                entitySelector: `type("SERVICE"),entityName("${serviceName}")`
+            },
+            headers: {
+                Authorization: `Api-Token ${API_TOKEN}`
             }
-          ]
+        });
+
+        const entities = response.data.entities;
+
+        if (entities && entities.length > 0) {
+            return entities[0].entityId;
         }
-      }))
-    );
 
-    const response = await axios.post(
-      `${ENV_URL}/api/v2/settings/objects`,
-      payload,
-      {
-        headers: {
-          Authorization: `Api-Token ${API_TOKEN}`,
-          "Content-Type": "application/json"
+        throw new Error(`Service not found: ${serviceName}`);
+    } catch (error) {
+        throw new Error(
+            error.response?.data
+                ? JSON.stringify(error.response.data)
+                : error.message
+        );
+    }
+}
+
+async function createKeyRequests() {
+    try {
+        const payload = [];
+
+        for (const service of services) {
+            const serviceId = await getServiceIdByName(service.serviceName);
+            console.log("ServiceId for - ", service.serviceName, "-", serviceId)
+
+            payload.push({
+                schemaId: "builtin:settings.subscriptions.service",
+                scope: serviceId,
+                value: {
+                    keyRequestNames: service.endpoints
+                }
+            });
         }
-      }
-    );
 
-    console.log("SUCCESS: Key Requests created");
-    console.log(JSON.stringify(response.data, null, 2));
+        const response = await axios.post(
+            `${ENV_URL}/api/v2/settings/objects`,
+            payload,
+            {
+                headers: {
+                    Authorization: `Api-Token ${API_TOKEN}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
 
-  } catch (error) {
-    console.error("ERROR creating Key Requests:");
-    console.error(
-      JSON.stringify(
-        error.response?.data || error.message,
-        null,
-        2
-      )
-    );
-  }
+        console.log("SUCCESS: Key Requests created");
+        console.log(JSON.stringify(response.data, null, 2));
+    } catch (error) {
+        console.error(
+            "ERROR:",
+            JSON.stringify(error.response?.data || error.message, null, 2)
+        );
+    }
 }
 
 createKeyRequests();
