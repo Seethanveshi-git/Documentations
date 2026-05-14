@@ -160,7 +160,7 @@ getServices();
 const axios = require("axios");
 
 const ENV_URL = "<ENV_URL>";
-const API_TOKEN = "<Token-id>";
+const API_TOKEN = "<TOKEN>";
 
 const services = [
     {
@@ -181,20 +181,32 @@ async function getServiceIdByName(serviceName) {
     try {
         const response = await axios.get(`${ENV_URL}/api/v2/entities`, {
             params: {
-                entitySelector: `type("SERVICE"),entityName("${serviceName}")`
+                entitySelector: `type("SERVICE"),entityName("${serviceName}")`,
+                fields: "firstSeenTms,lastSeenTms,properties",
             },
             headers: {
                 Authorization: `Api-Token ${API_TOKEN}`
             }
         });
 
-        const entities = response.data.entities;
+        const entities = response.data.entities || [];
 
-        if (entities && entities.length > 0) {
-            return entities[0].entityId;
+        if (entities.length === 0) {
+            throw new Error(`Service not found: ${serviceName}`);
         }
 
-        throw new Error(`Service not found: ${serviceName}`);
+        entities.sort((a, b) => {
+            if (b.lastSeenTms !== a.lastSeenTms) {
+                return b.lastSeenTms - a.lastSeenTms;
+            }
+            
+            return b.firstSeenTms - a.firstSeenTms;
+        });
+
+        const bestMatch = entities[0];
+
+        return bestMatch.entityId;
+
     } catch (error) {
         throw new Error(
             error.response?.data
@@ -209,8 +221,10 @@ async function createKeyRequests() {
         const payload = [];
 
         for (const service of services) {
+            // Wait for the ID to be found and returned
             const serviceId = await getServiceIdByName(service.serviceName);
-            console.log("ServiceId for - ", service.serviceName, "-", serviceId)
+            
+            console.log(`Success: Using ID ${serviceId} for ${service.serviceName}`);
 
             payload.push({
                 schemaId: "builtin:settings.subscriptions.service",
@@ -232,17 +246,18 @@ async function createKeyRequests() {
             }
         );
 
-        console.log("SUCCESS: Key Requests created");
+        console.log("\nFINAL SUCCESS: Key Requests created in Dynatrace");
         console.log(JSON.stringify(response.data, null, 2));
     } catch (error) {
         console.error(
-            "ERROR:",
+            "\nFINAL ERROR:",
             JSON.stringify(error.response?.data || error.message, null, 2)
         );
     }
 }
 
 createKeyRequests();
+
 ```
 
 ## Expected Response
@@ -256,6 +271,122 @@ createKeyRequests();
   }
 ]
 ```
+
+
+## Special Case: Handling Multiple Service IDs (The “Ghost ID” Problem)
+
+In real production environments, the Dynatrace API may occasionally return multiple entity IDs for the same service name.
+
+---
+
+## Why does this happen?
+
+## Redeployments & Rolling Updates
+
+Dynatrace may temporarily retain older service entities as inactive while simultaneously monitoring new active entities for the updated version.
+
+---
+
+## Infrastructure Changes
+
+Migrations (like moving between namespaces), cluster changes, or service re-identifications can trigger the creation of a new Entity ID for the same logical service.
+
+---
+
+## API Time Window
+
+By default, the API evaluates a recent time window (2 hours).
+
+If a service was restarted, both the old and new IDs will appear in the search results.
+
+---
+
+## How Our Script Handles This
+
+To prevent automation failures or targeting "stale" entities, the script applies a **Dual-Criteria Heuristic** based on both **Activity** and **Creation Time**.
+
+---
+
+## Step 1: Request Lifecycle Timestamps
+
+We request specific fields from the API to understand the "Pulse" and "Birth" of each entity.
+
+- `lastSeenTms`: The "Heartbeat" (Last time data was received)
+- `firstSeenTms`: The "Birth Date" (When the ID was first created)
+
+### API Request
+
+```bash
+const response = await axios.get(`${ENV_URL}/api/v2/entities`, {
+    params: {
+        entitySelector: `type("SERVICE"),entityName("${serviceName}")`,
+        fields: "firstSeenTms,lastSeenTms",
+    },
+    headers: {
+        Authorization: `Api-Token ${API_TOKEN}`
+    }
+});
+```
+
+---
+
+## Step 2: Prioritize Activity (Double-Sort Logic)
+
+The script sorts the results using two levels of priority:
+
+## Primary Priority (`lastSeenTms`)
+
+We prioritize the service that is currently communicating with Dynatrace.
+
+---
+
+## Secondary Priority (`firstSeenTms`)
+
+If two services are active simultaneously (common during rolling deployments), we select the most recently created entity.
+
+---
+
+## Sorting Implementation
+
+```bash
+entities.sort((a, b) => {
+
+    // 1. Check Heartbeat:
+    // Pick the entity seen most recently
+    if (b.lastSeenTms !== a.lastSeenTms) {
+        return b.lastSeenTms - a.lastSeenTms;
+    }
+
+    // 2. Tie-breaker:
+    // If both are active, pick the newest deployment
+    return b.firstSeenTms - a.firstSeenTms;
+});
+```
+
+---
+
+## Step 3: Select the "Best Match" Entity
+
+After sorting, the script selects the top result.
+
+```bash
+const bestMatch = entities[0];
+
+return bestMatch.entityId;
+```
+
+---
+
+## Outcome
+
+This guarantees that Key Requests are always applied to the:
+
+- Live service instance
+- Most recently active entity
+- Newest deployment version
+
+
+---
 
 
 ## Step 4: Verify Created Objects
